@@ -1020,3 +1020,141 @@ footer {
     justify-self: start;
   }
 }
+
+.sync-card {
+  grid-column: 1 / -1;
+  border-color: #d9cec8;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(248, 239, 234, 0.96));
+}
+
+.sync-card-content {
+  min-width: 0;
+}
+
+.sync-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.sync-status {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sync-status.online {
+  background: #e8f4e9;
+  color: #397247;
+}
+
+.sync-status.syncing {
+  background: #e9edf8;
+  color: #4f6191;
+}
+
+.sync-status.offline,
+.sync-status.error {
+  background: #fff0dc;
+  color: #9b5a1f;
+}
+
+.sync-status.local {
+  background: #f0ece7;
+  color: #756864;
+}
+
+.sync-setup,
+.sync-connected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.sync-connected {
+  display: grid;
+}
+
+.sync-code-box {
+  display: grid;
+  gap: 5px;
+  max-width: 550px;
+  padding: 14px;
+  border: 1px dashed #cdbbb2;
+  border-radius: 15px;
+  background: #fffdfc;
+}
+
+.sync-code-box span,
+.sync-code-box small {
+  color: #81736f;
+}
+
+.sync-code-box span {
+  font-size: 0.7rem;
+  font-weight: 750;
+}
+
+.sync-code-box strong {
+  overflow-wrap: anywhere;
+  font-size: clamp(1rem, 4vw, 1.35rem);
+  letter-spacing: 0.08em;
+}
+
+.sync-code-box small,
+.sync-pending {
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.sync-pending {
+  margin: 0 !important;
+  color: #9b5a1f !important;
+  font-weight: 700;
+}
+
+.join-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.join-form input {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #decfc8;
+  border-radius: 12px;
+  background: white;
+  color: #302b2a;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  outline: none;
+  text-transform: uppercase;
+}
+
+.join-form input:focus {
+  border-color: #aa755f;
+  box-shadow: 0 0 0 4px rgba(170, 117, 95, 0.12);
+}
+
+@media (max-width: 560px) {
+  .sync-heading {
+    flex-direction: column;
+  }
+
+  .join-form {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-setup > button,
+  .sync-connected .settings-actions > button {
+    flex: 1 1 100%;
+  }
+}

@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
+import {
+  applySyncMutation,
+  type StoredMutation,
+  type SyncMutation,
+  type SyncState,
+} from "./syncModel";
 import "./App.css";
 
-const STORAGE_KEY = "petit-dressing-v3";
-const LEGACY_STORAGE_KEYS = ["petit-dressing-v2", "petit-dressing-v1"];
+const STORAGE_KEY = "petit-dressing-v4";
+const LEGACY_STORAGE_KEYS = [
+  "petit-dressing-v3",
+  "petit-dressing-v2",
+  "petit-dressing-v1",
+];
+const SYNC_STORAGE_KEY = "petit-dressing-sync-v1";
 
 const SIZES = [
   "Naissance",
@@ -47,10 +58,69 @@ type Garment = {
 };
 
 type SavedState = {
-  version: 3;
+  version: 4;
   babyName: string;
   garments: Garment[];
 };
+
+type SyncStatus = "local" | "online" | "syncing" | "offline" | "error";
+
+type SyncConfig = {
+  code: string;
+  lastSeq: number;
+  pending: SyncMutation[];
+  seenMutationIds: string[];
+};
+
+const EMPTY_SYNC_CONFIG: SyncConfig = {
+  code: "",
+  lastSeq: 0,
+  pending: [],
+  seenMutationIds: [],
+};
+
+function loadSyncConfig(): SyncConfig {
+  try {
+    const raw = localStorage.getItem(SYNC_STORAGE_KEY);
+    if (!raw) return EMPTY_SYNC_CONFIG;
+    const parsed = JSON.parse(raw) as Partial<SyncConfig>;
+    return {
+      code: typeof parsed.code === "string" ? normalizeSyncCode(parsed.code) : "",
+      lastSeq: typeof parsed.lastSeq === "number" ? Math.max(0, parsed.lastSeq) : 0,
+      pending: Array.isArray(parsed.pending) ? parsed.pending : [],
+      seenMutationIds: Array.isArray(parsed.seenMutationIds)
+        ? parsed.seenMutationIds.filter((value): value is string => typeof value === "string").slice(-250)
+        : [],
+    };
+  } catch {
+    return EMPTY_SYNC_CONFIG;
+  }
+}
+
+function normalizeSyncCode(value: string) {
+  return value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 64);
+}
+
+function formatSyncCode(value: string) {
+  return normalizeSyncCode(value).match(/.{1,5}/g)?.join("-") ?? "";
+}
+
+function generateSyncCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+type MutationInput = SyncMutation extends infer Mutation
+  ? Mutation extends { id: string }
+    ? Omit<Mutation, "id">
+    : never
+  : never;
+
+function makeMutation(mutation: MutationInput): SyncMutation {
+  return { id: crypto.randomUUID(), ...mutation } as SyncMutation;
+}
+
 
 const SIZE_SEASONS: Record<Size, string> = {
   Naissance: "Plein hiver",
@@ -298,7 +368,7 @@ function migrateGarments(existing: unknown[]): Garment[] {
 
 function loadState(): SavedState {
   const fallback: SavedState = {
-    version: 3,
+    version: 4,
     babyName: "",
     garments: makeInitialGarments(),
   };
@@ -317,7 +387,7 @@ function loadState(): SavedState {
 
       if (Array.isArray(parsed.garments)) {
         return {
-          version: 3,
+          version: 4,
           babyName: typeof parsed.babyName === "string" ? parsed.babyName : "",
           garments: migrateGarments(parsed.garments),
         };
@@ -380,15 +450,56 @@ export default function App() {
     );
   });
   const importInputRef = useRef<HTMLInputElement>(null);
+  const [syncConfig, setSyncConfig] = useState<SyncConfig>(loadSyncConfig);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() =>
+    navigator.onLine ? (loadSyncConfig().code ? "online" : "local") : "offline",
+  );
+  const [joinCode, setJoinCode] = useState("");
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const syncConfigRef = useRef(syncConfig);
+  const appStateRef = useRef<SyncState>({ babyName, garments });
+  const syncBusyRef = useRef(false);
 
   useEffect(() => {
     const payload: SavedState = {
-      version: 3,
+      version: 4,
       babyName,
       garments,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    appStateRef.current = { babyName, garments };
   }, [babyName, garments]);
+
+  useEffect(() => {
+    syncConfigRef.current = syncConfig;
+    localStorage.setItem(SYNC_STORAGE_KEY, JSON.stringify(syncConfig));
+  }, [syncConfig]);
+
+  useEffect(() => {
+    if (!syncConfig.code) {
+      setSyncStatus(navigator.onLine ? "local" : "offline");
+      return;
+    }
+
+    void syncNow();
+    const timer = window.setInterval(() => void syncNow(), 5000);
+    const handleOnline = () => void syncNow();
+    const handleOffline = () => setSyncStatus("offline");
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void syncNow();
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [syncConfig.code]);
 
   useEffect(() => {
     if (!notice) return;
@@ -515,30 +626,279 @@ export default function App() {
     [garments],
   );
 
-  function updateQuantity(id: string, delta: number) {
+  function updateSyncConfigState(
+    updater: (current: SyncConfig) => SyncConfig,
+  ) {
+    setSyncConfig((current) => {
+      const next = updater(current);
+      syncConfigRef.current = next;
+      return next;
+    });
+  }
+
+  function applyMutationLocally(mutation: SyncMutation) {
+    if (mutation.type === "state-replace") {
+      setBabyName(mutation.state.babyName);
+      setGarments(mutation.state.garments as Garment[]);
+      return;
+    }
+
+    if (mutation.type === "baby-name-set") {
+      setBabyName(mutation.babyName);
+      return;
+    }
+
     setGarments((current) =>
-      current.map((item) =>
-        item.id === id
-          ? { ...item, quantity: Math.max(0, item.quantity + delta) }
-          : item,
-      ),
+      applySyncMutation(
+        { babyName: appStateRef.current.babyName, garments: current },
+        mutation,
+      ).garments as Garment[],
     );
+  }
+
+  function enqueueMutation(mutation: SyncMutation) {
+    if (!syncConfigRef.current.code) return;
+
+    updateSyncConfigState((current) => ({
+      ...current,
+      pending: [...current.pending, mutation],
+    }));
+
+    if (navigator.onLine) {
+      window.setTimeout(() => void syncNow(), 0);
+    }
+  }
+
+  function commitMutation(input: MutationInput) {
+    const mutation = makeMutation(input);
+    applyMutationLocally(mutation);
+    enqueueMutation(mutation);
+  }
+
+  async function syncFetch(
+    path: string,
+    options: RequestInit = {},
+    code = syncConfigRef.current.code,
+  ) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${normalizeSyncCode(code)}`,
+        ...(options.headers ?? {}),
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string }
+        | null;
+      throw new Error(payload?.error ?? `HTTP_${response.status}`);
+    }
+
+    return response;
+  }
+
+  async function flushPendingMutations() {
+    while (syncConfigRef.current.pending.length > 0) {
+      const current = syncConfigRef.current;
+      const mutation = current.pending[0];
+
+      await syncFetch("/api/sync/mutate", {
+        method: "POST",
+        body: JSON.stringify({ mutation }),
+      });
+
+      updateSyncConfigState((latest) => ({
+        ...latest,
+        pending: latest.pending.filter((item) => item.id !== mutation.id),
+        seenMutationIds: [
+          ...latest.seenMutationIds.filter((id) => id !== mutation.id),
+          mutation.id,
+        ].slice(-250),
+      }));
+    }
+  }
+
+  async function pullRemoteMutations() {
+    let hasMore = true;
+
+    while (hasMore) {
+      const current = syncConfigRef.current;
+      const response = await syncFetch(`/api/sync?since=${current.lastSeq}`);
+      const payload = (await response.json()) as {
+        mutations: StoredMutation[];
+        lastSeq: number;
+        hasMore: boolean;
+      };
+
+      const seen = new Set(current.seenMutationIds);
+      for (const item of payload.mutations) {
+        if (!seen.has(item.mutation.id)) {
+          applyMutationLocally(item.mutation);
+        }
+        seen.add(item.mutation.id);
+      }
+
+      updateSyncConfigState((latest) => ({
+        ...latest,
+        lastSeq: Math.max(latest.lastSeq, payload.lastSeq),
+        seenMutationIds: Array.from(
+          new Set([...latest.seenMutationIds, ...seen]),
+        ).slice(-250),
+      }));
+
+      hasMore = payload.hasMore;
+    }
+  }
+
+  async function syncNow() {
+    if (!syncConfigRef.current.code) {
+      setSyncStatus(navigator.onLine ? "local" : "offline");
+      return;
+    }
+    if (!navigator.onLine) {
+      setSyncStatus("offline");
+      return;
+    }
+    if (syncBusyRef.current) return;
+
+    syncBusyRef.current = true;
+    setSyncStatus("syncing");
+
+    try {
+      await flushPendingMutations();
+      await pullRemoteMutations();
+      setSyncStatus("online");
+    } catch (error) {
+      console.error(error);
+      setSyncStatus("error");
+    } finally {
+      syncBusyRef.current = false;
+    }
+  }
+
+  async function createSharedSpace() {
+    const code = generateSyncCode();
+    setSyncStatus("syncing");
+
+    try {
+      await syncFetch(
+        "/api/sync/create",
+        {
+          method: "POST",
+          body: JSON.stringify({ state: appStateRef.current }),
+        },
+        code,
+      );
+
+      const next: SyncConfig = {
+        code,
+        lastSeq: 0,
+        pending: [],
+        seenMutationIds: [],
+      };
+      syncConfigRef.current = next;
+      setSyncConfig(next);
+      setJoinCode(formatSyncCode(code));
+      setSyncStatus("online");
+      setNotice("Espace partagé créé.");
+    } catch (error) {
+      console.error(error);
+      setSyncStatus("error");
+      window.alert("Impossible de créer l’espace partagé pour le moment.");
+    }
+  }
+
+  async function joinSharedSpace() {
+    const code = normalizeSyncCode(joinCode);
+    if (code.length < 16) {
+      window.alert("Le code de synchronisation est incomplet.");
+      return;
+    }
+
+    setSyncStatus("syncing");
+    try {
+      const response = await syncFetch("/api/sync", {}, code);
+      const payload = (await response.json()) as {
+        state: SyncState;
+        lastSeq: number;
+      };
+
+      const confirmed = window.confirm(
+        "Charger le dressing partagé sur cet appareil ? Les données locales actuelles seront remplacées.",
+      );
+      if (!confirmed) {
+        setSyncStatus(syncConfigRef.current.code ? "online" : "local");
+        return;
+      }
+
+      setBabyName(payload.state.babyName);
+      setGarments(payload.state.garments as Garment[]);
+      const next: SyncConfig = {
+        code,
+        lastSeq: payload.lastSeq,
+        pending: [],
+        seenMutationIds: [],
+      };
+      syncConfigRef.current = next;
+      setSyncConfig(next);
+      setShowJoinForm(false);
+      setSyncStatus("online");
+      setNotice("Dressing partagé connecté.");
+    } catch (error) {
+      console.error(error);
+      setSyncStatus("error");
+      window.alert(
+        "Code introuvable ou synchronisation indisponible. Vérifie le code puis réessaie.",
+      );
+    }
+  }
+
+  function disconnectSharedSpace() {
+    const confirmed = window.confirm(
+      "Déconnecter cet appareil ? Le dressing restera enregistré localement.",
+    );
+    if (!confirmed) return;
+
+    syncConfigRef.current = EMPTY_SYNC_CONFIG;
+    setSyncConfig(EMPTY_SYNC_CONFIG);
+    setJoinCode("");
+    setSyncStatus(navigator.onLine ? "local" : "offline");
+    setNotice("Synchronisation déconnectée.");
+  }
+
+  async function copySyncCode() {
+    try {
+      await navigator.clipboard.writeText(formatSyncCode(syncConfig.code));
+      setNotice("Code copié.");
+    } catch {
+      window.prompt(
+        "Copie ce code :",
+        formatSyncCode(syncConfig.code),
+      );
+    }
+  }
+
+  function updateQuantity(id: string, delta: number) {
+    commitMutation({ type: "quantity-delta", garmentId: id, delta });
   }
 
   function completeItem(id: string) {
-    setGarments((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, quantity: item.target } : item,
-      ),
-    );
+    const item = garments.find((garment) => garment.id === id);
+    if (!item) return;
+    const delta = Math.max(0, item.target - item.quantity);
+    if (delta === 0) return;
+    commitMutation({ type: "quantity-delta", garmentId: id, delta });
   }
 
   function updateTarget(id: string, target: number) {
-    setGarments((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, target: Math.max(0, target) } : item,
-      ),
-    );
+    commitMutation({ type: "target-set", garmentId: id, target });
+  }
+
+  function updateBabyName(value: string) {
+    commitMutation({ type: "baby-name-set", babyName: value });
   }
 
   function addCustomItem() {
@@ -546,22 +906,20 @@ export default function App() {
     if (!label) return;
 
     const id = `${activeSize}-custom-${crypto.randomUUID()}`;
-    setGarments((current) => [
-      ...current,
-      {
-        id,
-        key: id,
-        label,
-        icon: "🍼",
-        group: newItemGroup,
-        size: activeSize,
-        quantity: 0,
-        target: 1,
-        custom: true,
-        hidden: false,
-      },
-    ]);
+    const garment: Garment = {
+      id,
+      key: id,
+      label,
+      icon: "🍼",
+      group: newItemGroup,
+      size: activeSize,
+      quantity: 0,
+      target: 1,
+      custom: true,
+      hidden: false,
+    };
 
+    commitMutation({ type: "custom-add", garment });
     setNewItemName("");
     setNewItemGroup("Autres");
     setShowAddForm(false);
@@ -570,7 +928,7 @@ export default function App() {
   function deleteCustomItem(id: string) {
     const confirmed = window.confirm("Supprimer cet élément personnalisé ?");
     if (!confirmed) return;
-    setGarments((current) => current.filter((item) => item.id !== id));
+    commitMutation({ type: "custom-delete", garmentId: id });
   }
 
   function resetCurrentSize() {
@@ -579,11 +937,7 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    setGarments((current) =>
-      current.map((item) =>
-        item.size === activeSize ? { ...item, quantity: 0 } : item,
-      ),
-    );
+    commitMutation({ type: "size-reset", size: activeSize });
   }
 
   function restoreWinterTargets() {
@@ -592,43 +946,26 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    const recommended = new Map(
+    const recommended = Object.fromEntries(
       makeInitialGarments().map((item) => [item.id, item.target]),
     );
 
-    setGarments((current) =>
-      current.map((item) =>
-        item.custom
-          ? item
-          : {
-              ...item,
-              target: recommended.get(item.id) ?? item.target,
-            },
-      ),
-    );
+    commitMutation({ type: "targets-restore", targets: recommended });
     setNotice("Objectifs hiver rétablis.");
   }
 
   function renameCategory(key: string, label: string) {
-    setGarments((current) =>
-      current.map((item) =>
-        item.key === key && !item.custom ? { ...item, label } : item,
-      ),
-    );
+    commitMutation({ type: "category-rename", key, label });
   }
 
   function toggleCategory(key: string) {
-    setGarments((current) => {
-      const currentItem = current.find(
-        (item) => item.key === key && !item.custom,
-      );
-      const nextHidden = !(currentItem?.hidden ?? false);
-
-      return current.map((item) =>
-        item.key === key && !item.custom
-          ? { ...item, hidden: nextHidden }
-          : item,
-      );
+    const currentItem = garments.find(
+      (item) => item.key === key && !item.custom,
+    );
+    commitMutation({
+      type: "category-hidden-set",
+      key,
+      hidden: !(currentItem?.hidden ?? false),
     });
   }
 
@@ -638,21 +975,11 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    const defaults = new Map(
+    const labels = Object.fromEntries(
       GARMENT_TEMPLATES.map((item) => [item.key, item.label]),
     );
 
-    setGarments((current) =>
-      current.map((item) =>
-        item.custom
-          ? item
-          : {
-              ...item,
-              label: defaults.get(item.key) ?? item.label,
-              hidden: false,
-            },
-      ),
-    );
+    commitMutation({ type: "categories-restore", labels });
     setNotice("Catégories rétablies.");
   }
 
@@ -662,8 +989,10 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    setBabyName("");
-    setGarments(makeInitialGarments());
+    commitMutation({
+      type: "state-replace",
+      state: { babyName: "", garments: makeInitialGarments() },
+    });
     setActiveSize("Naissance");
     setView("inventory");
     setNotice("Inventaire réinitialisé.");
@@ -671,7 +1000,7 @@ export default function App() {
 
   function exportBackup() {
     const backup: SavedState = {
-      version: 3,
+      version: 4,
       babyName,
       garments,
     };
@@ -720,8 +1049,13 @@ export default function App() {
       );
       if (!confirmed) return;
 
-      setBabyName(typeof parsed.babyName === "string" ? parsed.babyName : "");
-      setGarments(migrateGarments(imported));
+      commitMutation({
+        type: "state-replace",
+        state: {
+          babyName: typeof parsed.babyName === "string" ? parsed.babyName : "",
+          garments: migrateGarments(imported),
+        },
+      });
       setNotice("Sauvegarde importée.");
     } catch {
       window.alert("Ce fichier ne semble pas être une sauvegarde Petit Dressing valide.");
@@ -1096,10 +1430,116 @@ export default function App() {
                 <p>Il apparaîtra dans le titre de l’application.</p>
                 <input
                   value={babyName}
-                  onChange={(event) => setBabyName(event.target.value)}
+                  onChange={(event) => updateBabyName(event.target.value)}
                   placeholder="À compléter plus tard"
                   maxLength={30}
                 />
+              </div>
+            </article>
+
+            <article className="settings-card sync-card">
+              <div className="settings-icon">🔄</div>
+              <div className="sync-card-content">
+                <div className="sync-heading">
+                  <div>
+                    <h3>Synchronisation familiale</h3>
+                    <p>
+                      Le même dressing sur ton téléphone et celui d’Amélie, avec
+                      fonctionnement hors ligne et rattrapage automatique.
+                    </p>
+                  </div>
+                  <span className={`sync-status ${syncStatus}`}>
+                    {syncStatus === "online" && "À jour"}
+                    {syncStatus === "syncing" && "Synchronisation…"}
+                    {syncStatus === "offline" && "Hors ligne"}
+                    {syncStatus === "error" && "À vérifier"}
+                    {syncStatus === "local" && "Local uniquement"}
+                  </span>
+                </div>
+
+                {syncConfig.code ? (
+                  <div className="sync-connected">
+                    <div className="sync-code-box">
+                      <span>Code du dressing partagé</span>
+                      <strong>{formatSyncCode(syncConfig.code)}</strong>
+                      <small>
+                        À transmettre uniquement à la personne avec qui tu veux
+                        partager le dressing.
+                      </small>
+                    </div>
+                    <div className="settings-actions">
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={copySyncCode}
+                      >
+                        Copier le code
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => void syncNow()}
+                      >
+                        Synchroniser maintenant
+                      </button>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={disconnectSharedSpace}
+                      >
+                        Déconnecter cet appareil
+                      </button>
+                    </div>
+                    {syncConfig.pending.length > 0 && (
+                      <p className="sync-pending">
+                        {syncConfig.pending.length} modification
+                        {syncConfig.pending.length > 1 ? "s" : ""} en attente
+                        d’envoi.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="sync-setup">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={() => void createSharedSpace()}
+                    >
+                      Créer le dressing partagé
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setShowJoinForm((current) => !current)}
+                    >
+                      Rejoindre avec un code
+                    </button>
+
+                    {showJoinForm && (
+                      <div className="join-form">
+                        <input
+                          value={joinCode}
+                          onChange={(event) =>
+                            setJoinCode(formatSyncCode(event.target.value))
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void joinSharedSpace();
+                          }}
+                          placeholder="XXXXX-XXXXX-XXXXX-XXXXX"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <button
+                          type="button"
+                          className="primary-button"
+                          onClick={() => void joinSharedSpace()}
+                        >
+                          Rejoindre
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </article>
 
@@ -1258,7 +1698,7 @@ export default function App() {
       )}
 
       <footer>
-        Sauvegarde automatique locale · Petit Dressing v0.3
+        Sauvegarde locale + synchronisation familiale · Petit Dressing v0.4
       </footer>
     </main>
   );
