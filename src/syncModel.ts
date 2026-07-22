@@ -1,15 +1,11 @@
-export type SyncGarment = {
-  id: string;
-  key: string;
-  label: string;
-  icon: string;
-  group: string;
-  size: string;
-  quantity: number;
-  target: number;
-  custom?: boolean;
-  hidden?: boolean;
-};
+import {
+  applyAccessoryMoves,
+  type AccessoryMove,
+  type CatalogGarment,
+  upgradeState,
+} from "./catalog";
+
+export type SyncGarment = CatalogGarment;
 
 export type SyncState = {
   babyName: string;
@@ -31,6 +27,7 @@ export type SyncMutation =
       type: "categories-restore";
       labels: Record<string, string>;
     }
+  | { id: string; type: "accessories-migrate"; moves: AccessoryMove[] }
   | { id: string; type: "state-replace"; state: SyncState };
 
 export type StoredMutation = {
@@ -43,10 +40,16 @@ function clampInteger(value: number, minimum = 0) {
   return Math.max(minimum, Math.round(value));
 }
 
+export function normalizeSyncState(value: unknown): SyncState {
+  return upgradeState(value);
+}
+
 export function applySyncMutation(
-  state: SyncState,
+  rawState: SyncState,
   mutation: SyncMutation,
 ): SyncState {
+  const state = normalizeSyncState(rawState);
+
   switch (mutation.type) {
     case "quantity-delta":
       return {
@@ -78,10 +81,10 @@ export function applySyncMutation(
       if (state.garments.some((item) => item.id === mutation.garment.id)) {
         return state;
       }
-      return {
+      return normalizeSyncState({
         ...state,
         garments: [...state.garments, mutation.garment],
-      };
+      });
 
     case "custom-delete":
       return {
@@ -143,10 +146,16 @@ export function applySyncMutation(
         ),
       };
 
-    case "state-replace":
+    case "accessories-migrate":
       return {
-        babyName: mutation.state.babyName,
-        garments: mutation.state.garments,
+        ...state,
+        garments: applyAccessoryMoves(state.garments, mutation.moves),
       };
+
+    case "state-replace":
+      return normalizeSyncState(mutation.state);
+
+    default:
+      return state;
   }
 }

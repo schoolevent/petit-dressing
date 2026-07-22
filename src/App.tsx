@@ -1,64 +1,51 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import {
+  ACCESSORIES_SECTION,
+  ALL_TEMPLATES,
+  ICON_LIBRARY,
+  INVENTORY_SECTIONS,
+  SECTION_SUBTITLES,
+  getAccessoryMigrationCandidates,
+  groupsForSection,
+  makeInitialGarments,
+  normalizeGarment,
+  suggestIcon,
+  upgradeGarments,
+  type AccessoryMigrationCandidate,
+  type CatalogGarment as Garment,
+  type GarmentGroup as Group,
+  type InventorySection,
+} from "./catalog";
+import {
   applySyncMutation,
+  normalizeSyncState,
   type StoredMutation,
   type SyncMutation,
   type SyncState,
 } from "./syncModel";
 import "./App.css";
 
-const STORAGE_KEY = "petit-dressing-v4";
+const STORAGE_KEY = "petit-dressing-v5";
 const LEGACY_STORAGE_KEYS = [
+  "petit-dressing-v4",
   "petit-dressing-v3",
   "petit-dressing-v2",
   "petit-dressing-v1",
 ];
 const SYNC_STORAGE_KEY = "petit-dressing-sync-v1";
+const ACCESSORY_MIGRATION_DISMISSED_KEY =
+  "petit-dressing-accessory-migration-dismissed-v1";
 
-const SIZES = [
-  "Naissance",
-  "1 mois",
-  "3 mois",
-  "6 mois",
-  "9 mois",
-  "12 mois",
-  "18 mois",
-  "24 mois",
-] as const;
-
-type Size = (typeof SIZES)[number];
 type View = "inventory" | "shopping" | "settings";
-type Group = "Dodo" | "Essentiels" | "Tenues" | "Extérieur" | "Autres";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 };
 
-type GarmentTemplate = {
-  key: string;
-  label: string;
-  icon: string;
-  group: Group;
-  targets: Record<Size, number>;
-};
-
-type Garment = {
-  id: string;
-  key: string;
-  label: string;
-  icon: string;
-  group: Group;
-  size: Size;
-  quantity: number;
-  target: number;
-  custom?: boolean;
-  hidden?: boolean;
-};
-
 type SavedState = {
-  version: 4;
+  version: 5;
   babyName: string;
   garments: Garment[];
 };
@@ -86,10 +73,13 @@ function loadSyncConfig(): SyncConfig {
     const parsed = JSON.parse(raw) as Partial<SyncConfig>;
     return {
       code: typeof parsed.code === "string" ? normalizeSyncCode(parsed.code) : "",
-      lastSeq: typeof parsed.lastSeq === "number" ? Math.max(0, parsed.lastSeq) : 0,
+      lastSeq:
+        typeof parsed.lastSeq === "number" ? Math.max(0, parsed.lastSeq) : 0,
       pending: Array.isArray(parsed.pending) ? parsed.pending : [],
       seenMutationIds: Array.isArray(parsed.seenMutationIds)
-        ? parsed.seenMutationIds.filter((value): value is string => typeof value === "string").slice(-250)
+        ? parsed.seenMutationIds
+            .filter((value): value is string => typeof value === "string")
+            .slice(-250)
         : [],
     };
   } catch {
@@ -121,262 +111,15 @@ function makeMutation(mutation: MutationInput): SyncMutation {
   return { id: crypto.randomUUID(), ...mutation } as SyncMutation;
 }
 
-
-const SIZE_SEASONS: Record<Size, string> = {
-  Naissance: "Plein hiver",
-  "1 mois": "Hiver",
-  "3 mois": "Fin d’hiver",
-  "6 mois": "Printemps",
-  "9 mois": "Été",
-  "12 mois": "Hiver suivant",
-  "18 mois": "Été suivant",
-  "24 mois": "Hiver suivant",
-};
-
-function targets(
-  naissance: number,
-  one: number,
-  three: number,
-  six: number,
-  nine: number,
-  twelve: number,
-  eighteen: number,
-  twentyFour: number,
-): Record<Size, number> {
-  return {
-    Naissance: naissance,
-    "1 mois": one,
-    "3 mois": three,
-    "6 mois": six,
-    "9 mois": nine,
-    "12 mois": twelve,
-    "18 mois": eighteen,
-    "24 mois": twentyFour,
-  };
-}
-
-const GARMENT_TEMPLATES: GarmentTemplate[] = [
-  {
-    key: "pyjama-velours",
-    label: "Pyjamas velours",
-    icon: "🌙",
-    group: "Dodo",
-    targets: targets(7, 8, 6, 3, 1, 5, 1, 5),
-  },
-  {
-    key: "pyjama-coton",
-    label: "Pyjamas coton",
-    icon: "☁️",
-    group: "Dodo",
-    targets: targets(2, 3, 4, 5, 6, 3, 6, 3),
-  },
-  {
-    key: "gigoteuse-chaude",
-    label: "Gigoteuses TOG 2,5",
-    icon: "🛏️",
-    group: "Dodo",
-    targets: targets(2, 2, 2, 1, 0, 2, 0, 2),
-  },
-  {
-    key: "gigoteuse-legere",
-    label: "Gigoteuses légères",
-    icon: "🪽",
-    group: "Dodo",
-    targets: targets(0, 0, 1, 2, 2, 1, 2, 1),
-  },
-  {
-    key: "body-long",
-    label: "Bodies manches longues",
-    icon: "👕",
-    group: "Essentiels",
-    targets: targets(7, 8, 7, 5, 2, 6, 3, 6),
-  },
-  {
-    key: "body-short",
-    label: "Bodies manches courtes",
-    icon: "👚",
-    group: "Essentiels",
-    targets: targets(0, 1, 2, 5, 7, 3, 7, 3),
-  },
-  {
-    key: "chaussettes",
-    label: "Paires de chaussettes",
-    icon: "🧦",
-    group: "Essentiels",
-    targets: targets(4, 5, 6, 6, 6, 6, 6, 6),
-  },
-  {
-    key: "bavoir",
-    label: "Bavoirs",
-    icon: "🍪",
-    group: "Essentiels",
-    targets: targets(6, 8, 8, 8, 8, 8, 8, 8),
-  },
-  {
-    key: "pantalon",
-    label: "Pantalons",
-    icon: "👖",
-    group: "Tenues",
-    targets: targets(2, 3, 4, 5, 5, 5, 5, 5),
-  },
-  {
-    key: "haut",
-    label: "Hauts",
-    icon: "🧸",
-    group: "Tenues",
-    targets: targets(2, 3, 4, 5, 6, 5, 6, 5),
-  },
-  {
-    key: "pull-gilet",
-    label: "Pulls et gilets",
-    icon: "🧶",
-    group: "Tenues",
-    targets: targets(2, 3, 3, 3, 1, 3, 1, 3),
-  },
-  {
-    key: "ensemble",
-    label: "Ensembles / tenues",
-    icon: "✨",
-    group: "Tenues",
-    targets: targets(2, 3, 3, 4, 4, 4, 4, 4),
-  },
-  {
-    key: "combinaison",
-    label: "Manteau / combinaison",
-    icon: "🧥",
-    group: "Extérieur",
-    targets: targets(1, 1, 1, 1, 0, 1, 0, 1),
-  },
-  {
-    key: "bonnet-chaud",
-    label: "Bonnets chauds",
-    icon: "🧢",
-    group: "Extérieur",
-    targets: targets(2, 2, 1, 0, 0, 2, 0, 2),
-  },
-  {
-    key: "bonnet-leger",
-    label: "Bonnets légers / soleil",
-    icon: "☀️",
-    group: "Extérieur",
-    targets: targets(1, 1, 1, 2, 2, 1, 2, 1),
-  },
-  {
-    key: "chaussons",
-    label: "Chaussons",
-    icon: "🐾",
-    group: "Extérieur",
-    targets: targets(1, 1, 1, 1, 1, 1, 1, 1),
-  },
-];
-
-const GROUPS: Group[] = ["Dodo", "Essentiels", "Tenues", "Extérieur", "Autres"];
-
-const LEGACY_KEY_MAP: Partial<Record<string, string>> = {
-  "pyjama-velours": "pyjama",
-  "gigoteuse-chaude": "gigoteuse",
-  combinaison: "manteau",
-  "bonnet-chaud": "bonnet",
-};
-
-function makeInitialGarments(): Garment[] {
-  return SIZES.flatMap((size) =>
-    GARMENT_TEMPLATES.map((item) => ({
-      id: `${size}-${item.key}`,
-      key: item.key,
-      label: item.label,
-      icon: item.icon,
-      group: item.group,
-      size,
-      quantity: 0,
-      target: item.targets[size],
-      hidden: false,
-    })),
-  );
-}
-
-function normalizeGarment(value: unknown): Garment | null {
-  if (!value || typeof value !== "object") return null;
-  const item = value as Partial<Garment>;
-
-  if (
-    typeof item.id !== "string" ||
-    typeof item.key !== "string" ||
-    typeof item.label !== "string" ||
-    typeof item.icon !== "string" ||
-    typeof item.size !== "string" ||
-    !SIZES.includes(item.size as Size) ||
-    typeof item.quantity !== "number" ||
-    typeof item.target !== "number"
-  ) {
-    return null;
-  }
-
-  const safeGroup = GROUPS.includes(item.group as Group)
-    ? (item.group as Group)
-    : "Autres";
-
-  return {
-    id: item.id,
-    key: item.key,
-    label: item.label,
-    icon: item.icon,
-    group: safeGroup,
-    size: item.size as Size,
-    quantity: Math.max(0, Math.round(item.quantity)),
-    target: Math.max(0, Math.round(item.target)),
-    custom: Boolean(item.custom),
-    hidden: Boolean(item.hidden),
-  };
-}
-
-function migrateGarments(existing: unknown[]): Garment[] {
-  const cleanExisting = existing
-    .map(normalizeGarment)
-    .filter((item): item is Garment => item !== null);
-
-  const byId = new Map(cleanExisting.map((item) => [item.id, item]));
-  const fresh = makeInitialGarments().map((item) => {
-    const exact = byId.get(item.id);
-    if (exact) {
-      return {
-        ...item,
-        label: exact.label,
-        quantity: exact.quantity,
-        target: exact.target,
-        hidden: exact.hidden,
-      };
-    }
-
-    const legacyKey = LEGACY_KEY_MAP[item.key];
-    if (legacyKey) {
-      const legacy = byId.get(`${item.size}-${legacyKey}`);
-      if (legacy) {
-        return {
-          ...item,
-          quantity: legacy.quantity,
-        };
-      }
-    }
-
-    return item;
-  });
-
-  const customItems = cleanExisting.filter((item) => item.custom);
-  return [...fresh, ...customItems];
-}
-
 function loadState(): SavedState {
   const fallback: SavedState = {
-    version: 4,
+    version: 5,
     babyName: "",
     garments: makeInitialGarments(),
   };
 
   try {
-    const keys = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
-
-    for (const key of keys) {
+    for (const key of [STORAGE_KEY, ...LEGACY_STORAGE_KEYS]) {
       const raw = localStorage.getItem(key);
       if (!raw) continue;
 
@@ -387,9 +130,10 @@ function loadState(): SavedState {
 
       if (Array.isArray(parsed.garments)) {
         return {
-          version: 4,
-          babyName: typeof parsed.babyName === "string" ? parsed.babyName : "",
-          garments: migrateGarments(parsed.garments),
+          version: 5,
+          babyName:
+            typeof parsed.babyName === "string" ? parsed.babyName.slice(0, 30) : "",
+          garments: upgradeGarments(parsed.garments),
         };
       }
     }
@@ -434,11 +178,16 @@ export default function App() {
   const [babyName, setBabyName] = useState(savedState.babyName);
   const [garments, setGarments] = useState<Garment[]>(savedState.garments);
   const [view, setView] = useState<View>("inventory");
-  const [activeSize, setActiveSize] = useState<Size>("Naissance");
+  const [activeSize, setActiveSize] = useState<InventorySection>("Naissance");
   const [onlyMissing, setOnlyMissing] = useState(false);
   const [newItemName, setNewItemName] = useState("");
   const [newItemGroup, setNewItemGroup] = useState<Group>("Autres");
+  const [newItemIcon, setNewItemIcon] = useState("🍼");
+  const [iconManuallySelected, setIconManuallySelected] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showAccessoryMigration, setShowAccessoryMigration] = useState(
+    () => localStorage.getItem(ACCESSORY_MIGRATION_DISMISSED_KEY) !== "1",
+  );
   const [notice, setNotice] = useState("");
   const [installPrompt, setInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
@@ -462,7 +211,7 @@ export default function App() {
 
   useEffect(() => {
     const payload: SavedState = {
-      version: 4,
+      version: 5,
       babyName,
       garments,
     };
@@ -563,20 +312,24 @@ export default function App() {
     };
   }, [sizeGarments]);
 
+  const activeGroups = useMemo(() => groupsForSection(activeSize), [activeSize]);
+
   const groupedGarments = useMemo(
     () =>
-      GROUPS.map((group) => ({
-        group,
-        items: visibleGarments.filter((item) => item.group === group),
-      })).filter((section) => section.items.length > 0),
-    [visibleGarments],
+      activeGroups
+        .map((group) => ({
+          group,
+          items: visibleGarments.filter((item) => item.group === group),
+        }))
+        .filter((section) => section.items.length > 0),
+    [activeGroups, visibleGarments],
   );
 
   const shoppingList = useMemo(
     () =>
-      SIZES.map((size) => ({
+      INVENTORY_SECTIONS.map((size) => ({
         size,
-        season: SIZE_SEASONS[size],
+        season: SECTION_SUBTITLES[size],
         items: activeGarments.filter(
           (item) => item.size === size && item.target > item.quantity,
         ),
@@ -603,13 +356,13 @@ export default function App() {
     return {
       missingPieces,
       categories,
-      sizes: shoppingList.length,
+      sections: shoppingList.length,
     };
   }, [shoppingList]);
 
   const catalog = useMemo(
     () =>
-      GARMENT_TEMPLATES.map((template) => {
+      ALL_TEMPLATES.map((template) => {
         const item = garments.find(
           (garment) => garment.key === template.key && !garment.custom,
         );
@@ -626,6 +379,46 @@ export default function App() {
     [garments],
   );
 
+
+
+  const accessoryMigrationCandidates = useMemo(
+    () => getAccessoryMigrationCandidates(garments),
+    [garments],
+  );
+
+  const accessoryMigrationSummary = useMemo(() => {
+    const grouped = new Map<
+      string,
+      { icon: string; label: string; quantity: number }
+    >();
+
+    for (const candidate of accessoryMigrationCandidates) {
+      const current = grouped.get(candidate.destinationKey);
+      grouped.set(candidate.destinationKey, {
+        icon: candidate.destinationIcon,
+        label: candidate.destinationLabel,
+        quantity: (current?.quantity ?? 0) + candidate.quantity,
+      });
+    }
+
+    return Array.from(grouped.values());
+  }, [accessoryMigrationCandidates]);
+
+  useEffect(() => {
+    setNewItemGroup("Autres");
+    setShowAddForm(false);
+    setNewItemName("");
+    setNewItemIcon("🍼");
+    setIconManuallySelected(false);
+  }, [activeSize]);
+
+  useEffect(() => {
+    if (accessoryMigrationCandidates.length === 0) {
+      setShowAccessoryMigration(false);
+      localStorage.removeItem(ACCESSORY_MIGRATION_DISMISSED_KEY);
+    }
+  }, [accessoryMigrationCandidates.length]);
+
   function updateSyncConfigState(
     updater: (current: SyncConfig) => SyncConfig,
   ) {
@@ -638,8 +431,9 @@ export default function App() {
 
   function applyMutationLocally(mutation: SyncMutation) {
     if (mutation.type === "state-replace") {
-      setBabyName(mutation.state.babyName);
-      setGarments(mutation.state.garments as Garment[]);
+      const nextState = normalizeSyncState(mutation.state);
+      setBabyName(nextState.babyName);
+      setGarments(nextState.garments);
       return;
     }
 
@@ -834,8 +628,9 @@ export default function App() {
         return;
       }
 
-      setBabyName(payload.state.babyName);
-      setGarments(payload.state.garments as Garment[]);
+      const sharedState = normalizeSyncState(payload.state);
+      setBabyName(sharedState.babyName);
+      setGarments(sharedState.garments);
       const next: SyncConfig = {
         code,
         lastSeq: payload.lastSeq,
@@ -901,6 +696,33 @@ export default function App() {
     commitMutation({ type: "baby-name-set", babyName: value });
   }
 
+  function migrateAccessories(candidates: AccessoryMigrationCandidate[]) {
+    if (candidates.length === 0) return;
+
+    commitMutation({
+      type: "accessories-migrate",
+      moves: candidates.map((candidate) => ({
+        sourceId: candidate.sourceId,
+        destinationKey: candidate.destinationKey,
+      })),
+    });
+    localStorage.removeItem(ACCESSORY_MIGRATION_DISMISSED_KEY);
+    setShowAccessoryMigration(false);
+    setActiveSize(ACCESSORIES_SECTION);
+    setView("inventory");
+    setNotice("Accessoires regroupés sans perte de données.");
+  }
+
+  function postponeAccessoryMigration() {
+    localStorage.setItem(ACCESSORY_MIGRATION_DISMISSED_KEY, "1");
+    setShowAccessoryMigration(false);
+  }
+
+  function reopenAccessoryMigration() {
+    localStorage.removeItem(ACCESSORY_MIGRATION_DISMISSED_KEY);
+    setShowAccessoryMigration(true);
+  }
+
   function addCustomItem() {
     const label = newItemName.trim();
     if (!label) return;
@@ -910,7 +732,7 @@ export default function App() {
       id,
       key: id,
       label,
-      icon: "🍼",
+      icon: newItemIcon,
       group: newItemGroup,
       size: activeSize,
       quantity: 0,
@@ -922,6 +744,8 @@ export default function App() {
     commitMutation({ type: "custom-add", garment });
     setNewItemName("");
     setNewItemGroup("Autres");
+    setNewItemIcon("🍼");
+    setIconManuallySelected(false);
     setShowAddForm(false);
   }
 
@@ -933,7 +757,7 @@ export default function App() {
 
   function resetCurrentSize() {
     const confirmed = window.confirm(
-      `Remettre toutes les quantités de la taille « ${activeSize} » à zéro ?`,
+      `Remettre toutes les quantités de la section « ${activeSize} » à zéro ?`,
     );
     if (!confirmed) return;
 
@@ -942,7 +766,7 @@ export default function App() {
 
   function restoreWinterTargets() {
     const confirmed = window.confirm(
-      "Rétablir les objectifs conseillés pour un bébé d’hiver ? Les quantités déjà encodées seront conservées.",
+      "Rétablir tous les objectifs conseillés pour un bébé d’hiver ? Les quantités déjà encodées seront conservées.",
     );
     if (!confirmed) return;
 
@@ -976,7 +800,7 @@ export default function App() {
     if (!confirmed) return;
 
     const labels = Object.fromEntries(
-      GARMENT_TEMPLATES.map((item) => [item.key, item.label]),
+      ALL_TEMPLATES.map((item) => [item.key, item.label]),
     );
 
     commitMutation({ type: "categories-restore", labels });
@@ -1000,7 +824,7 @@ export default function App() {
 
   function exportBackup() {
     const backup: SavedState = {
-      version: 4,
+      version: 5,
       babyName,
       garments,
     };
@@ -1053,7 +877,7 @@ export default function App() {
         type: "state-replace",
         state: {
           babyName: typeof parsed.babyName === "string" ? parsed.babyName : "",
-          garments: migrateGarments(imported),
+          garments: upgradeGarments(imported),
         },
       });
       setNotice("Sauvegarde importée.");
@@ -1080,12 +904,79 @@ export default function App() {
     <main className="app-shell">
       {notice && <div className="toast">{notice}</div>}
 
+      {showAccessoryMigration && accessoryMigrationCandidates.length > 0 && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="migration-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="migration-title"
+          >
+            <div className="migration-heading">
+              <span aria-hidden="true">🧺</span>
+              <div>
+                <p className="eyebrow">Mise à jour du dressing</p>
+                <h2 id="migration-title">Regrouper les accessoires ?</h2>
+              </div>
+            </div>
+            <p>
+              J’ai retrouvé des articles sans taille dans Naissance, 1 mois ou
+              d’autres tailles. Ils peuvent être déplacés dans la nouvelle section
+              Accessoires sans modifier les quantités.
+            </p>
+
+            <div className="migration-summary">
+              {accessoryMigrationSummary.map((item) => (
+                <article key={item.label}>
+                  <span>{item.icon}</span>
+                  <div>
+                    <strong>{item.label}</strong>
+                    <small>{item.quantity} pièce{item.quantity > 1 ? "s" : ""}</small>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <details className="migration-details">
+              <summary>Voir d’où viennent les articles</summary>
+              <ul>
+                {accessoryMigrationCandidates.map((candidate) => (
+                  <li key={candidate.sourceId}>
+                    <span>{candidate.sourceLabel}</span>
+                    <small>
+                      {candidate.sourceSection} · {candidate.quantity}
+                    </small>
+                  </li>
+                ))}
+              </ul>
+            </details>
+
+            <div className="migration-actions">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => migrateAccessories(accessoryMigrationCandidates)}
+              >
+                Déplacer automatiquement
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={postponeAccessoryMigration}
+              >
+                Plus tard
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       <header className="hero">
         <div className="brand-block">
           <p className="eyebrow">Inventaire bébé</p>
           <h1>{dressingTitle}</h1>
           <p className="hero-copy">
-            Un inventaire simple, adapté à l’arrivée d’un bébé en hiver.
+            Vêtements, accessoires et liste d’achats réunis au même endroit.
           </p>
         </div>
 
@@ -1122,16 +1013,22 @@ export default function App() {
 
       {view === "inventory" && (
         <>
-          <nav className="size-tabs" aria-label="Tailles">
-            {SIZES.map((size) => (
+          <nav className="size-tabs" aria-label="Sections du dressing">
+            {INVENTORY_SECTIONS.map((size) => (
               <button
                 key={size}
                 type="button"
-                className={size === activeSize ? "size-tab active" : "size-tab"}
+                className={[
+                  "size-tab",
+                  size === activeSize ? "active" : "",
+                  size === ACCESSORIES_SECTION ? "accessories-tab" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 onClick={() => setActiveSize(size)}
               >
                 <span>{size}</span>
-                <small>{SIZE_SEASONS[size]}</small>
+                <small>{SECTION_SUBTITLES[size]}</small>
               </button>
             ))}
           </nav>
@@ -1174,14 +1071,16 @@ export default function App() {
             </label>
 
             <button type="button" className="text-button" onClick={resetCurrentSize}>
-              Réinitialiser cette taille
+              {activeSize === ACCESSORIES_SECTION
+                ? "Réinitialiser les accessoires"
+                : "Réinitialiser cette taille"}
             </button>
           </section>
 
           <section className="wardrobe">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">{SIZE_SEASONS[activeSize]}</p>
+                <p className="eyebrow">{SECTION_SUBTITLES[activeSize]}</p>
                 <h2>{activeSize}</h2>
                 <p className="section-description">
                   Les objectifs sont des repères de départ et restent modifiables.
@@ -1198,36 +1097,74 @@ export default function App() {
 
             {showAddForm && (
               <div className="add-form">
-                <input
-                  autoFocus
-                  value={newItemName}
-                  onChange={(event) => setNewItemName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") addCustomItem();
-                    if (event.key === "Escape") setShowAddForm(false);
-                  }}
-                  placeholder="Ex. salopettes, moufles…"
-                />
-                <select
-                  value={newItemGroup}
-                  onChange={(event) => setNewItemGroup(event.target.value as Group)}
-                >
-                  {GROUPS.map((group) => (
-                    <option key={group} value={group}>
-                      {group}
-                    </option>
-                  ))}
-                </select>
-                <button type="button" onClick={addCustomItem}>
-                  Ajouter
-                </button>
+                <div className="add-form-fields">
+                  <div className="selected-item-icon" aria-hidden="true">
+                    {newItemIcon}
+                  </div>
+                  <input
+                    autoFocus
+                    value={newItemName}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setNewItemName(value);
+                      if (!iconManuallySelected) {
+                        setNewItemIcon(suggestIcon(value));
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") addCustomItem();
+                      if (event.key === "Escape") setShowAddForm(false);
+                    }}
+                    placeholder={
+                      activeSize === ACCESSORIES_SECTION
+                        ? "Ex. gants de toilette, couvertures…"
+                        : "Ex. salopettes, moufles…"
+                    }
+                  />
+                  <select
+                    value={newItemGroup}
+                    onChange={(event) =>
+                      setNewItemGroup(event.target.value as Group)
+                    }
+                  >
+                    {groupsForSection(activeSize).map((group) => (
+                      <option key={group} value={group}>
+                        {group}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={addCustomItem}>
+                    Ajouter
+                  </button>
+                </div>
+
+                <div className="icon-library">
+                  <span>Icône de l’article</span>
+                  <div className="icon-grid" role="list" aria-label="Bibliothèque d’icônes">
+                    {ICON_LIBRARY.map((icon) => (
+                      <button
+                        type="button"
+                        key={icon}
+                        className={icon === newItemIcon ? "selected" : ""}
+                        onClick={() => {
+                          setNewItemIcon(icon);
+                          setIconManuallySelected(true);
+                        }}
+                        aria-label={`Utiliser l’icône ${icon}`}
+                        aria-pressed={icon === newItemIcon}
+                      >
+                        {icon}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
             {groupedGarments.length === 0 ? (
               <div className="empty-state">
                 <span>🎉</span>
-                <h3>Tout est prêt pour cette taille</h3>
+                <h3>Tout est prêt dans cette section</h3>
                 <p>Désactive le filtre pour revoir l’inventaire complet.</p>
               </div>
             ) : (
@@ -1340,8 +1277,8 @@ export default function App() {
               <span>catégories à compléter</span>
             </article>
             <article>
-              <strong>{shoppingSummary.sizes}</strong>
-              <span>tailles concernées</span>
+              <strong>{shoppingSummary.sections}</strong>
+              <span>sections concernées</span>
             </article>
           </section>
 
@@ -1436,6 +1373,30 @@ export default function App() {
                 />
               </div>
             </article>
+
+            {accessoryMigrationCandidates.length > 0 && (
+              <article className="settings-card migration-settings-card">
+                <div className="settings-icon">🧺</div>
+                <div>
+                  <h3>Articles à reclasser</h3>
+                  <p>
+                    {accessoryMigrationCandidates.reduce(
+                      (sum, item) => sum + item.quantity,
+                      0,
+                    )}{" "}
+                    pièce(s) peuvent être regroupées dans la nouvelle section
+                    Accessoires, sans rien réencoder.
+                  </p>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={reopenAccessoryMigration}
+                  >
+                    Vérifier et déplacer
+                  </button>
+                </div>
+              </article>
+            )}
 
             <article className="settings-card sync-card">
               <div className="settings-icon">🔄</div>
@@ -1577,17 +1538,17 @@ export default function App() {
             <article className="settings-card">
               <div className="settings-icon">❄️</div>
               <div>
-                <h3>Profil bébé d’hiver</h3>
+                <h3>Objectifs conseillés</h3>
                 <p>
-                  Les objectifs suivent les saisons probables de chaque taille. Tu peux
-                  toujours les modifier directement dans le dressing.
+                  Les objectifs suivent les saisons probables de chaque taille et
+                  incluent maintenant les accessoires. Ils restent entièrement modifiables.
                 </p>
                 <button
                   type="button"
                   className="secondary-button"
                   onClick={restoreWinterTargets}
                 >
-                  Rétablir les objectifs conseillés
+                  Rétablir tous les objectifs conseillés
                 </button>
               </div>
             </article>
@@ -1630,7 +1591,7 @@ export default function App() {
               <div className="catalog-content">
                 <div className="catalog-heading">
                   <div>
-                    <h3>Catégories du dressing</h3>
+                    <h3>Catégories et accessoires</h3>
                     <p>
                       Renomme une catégorie ou masque-la partout, sans supprimer les
                       quantités déjà encodées.
@@ -1698,7 +1659,7 @@ export default function App() {
       )}
 
       <footer>
-        Sauvegarde locale + synchronisation familiale · Petit Dressing v0.4
+        Sauvegarde locale + synchronisation familiale · Petit Dressing v0.5
       </footer>
     </main>
   );

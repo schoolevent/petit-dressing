@@ -1,5 +1,6 @@
 import {
   applySyncMutation,
+  normalizeSyncState,
   type StoredMutation,
   type SyncMutation,
   type SyncState,
@@ -146,7 +147,7 @@ async function getFullState(db: D1Database, roomHash: string) {
 
   if (!space) return null;
 
-  let state = JSON.parse(space.initial_state) as SyncState;
+  let state = normalizeSyncState(JSON.parse(space.initial_state));
   const result = await db
     .prepare(
       `SELECT seq, mutation_json
@@ -178,7 +179,7 @@ async function handleCreate(request: Request, env: Env, roomHash: string) {
      (room_hash, initial_state, created_at)
      VALUES (?, ?, ?)`,
   )
-    .bind(roomHash, JSON.stringify(body.state), Date.now())
+    .bind(roomHash, JSON.stringify(normalizeSyncState(body.state)), Date.now())
     .run();
 
   if ((result.meta.changes ?? 0) === 0) {

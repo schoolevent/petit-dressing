@@ -1,7 +1,7 @@
 {
   "name": "Petit Dressing",
   "short_name": "Dressing",
-  "description": "Inventaire simple et visuel des vêtements de bébé",
+  "description": "Inventaire simple et visuel des vêtements et accessoires de bébé",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

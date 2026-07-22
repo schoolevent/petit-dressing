@@ -1,55 +1,34 @@
-# Petit Dressing v0.4 — synchronisation familiale
+# Petit Dressing v0.5 — accessoires et icônes
 
 ## Nouveautés
 
-- synchronisation automatique entre plusieurs téléphones ;
-- création d’un dressing partagé avec un code privé ;
-- fonctionnement hors ligne : les modifications sont mises en attente puis envoyées au retour du réseau ;
-- synchronisation par petites opérations pour éviter qu’une modification simultanée écrase l’autre ;
-- stockage Cloudflare D1, lié au Worker existant ;
-- conservation de la sauvegarde locale et de l’export/import JSON.
+- nouvelle section **Accessoires**, valable pour tous les âges ;
+- catégories intégrées : bavoirs, bavettes, tétras / langes coton et capes de bain ;
+- détection des accessoires déjà encodés dans les tailles ;
+- migration proposée sans perte de quantité, avec résumé avant validation ;
+- bibliothèque d’icônes pour les articles personnalisés ;
+- suggestion automatique d’icône selon le nom saisi ;
+- synchronisation de la migration et des nouvelles icônes entre les téléphones.
 
 ## Installation de la mise à jour
 
-1. Arrêter le serveur local avec `Ctrl + C`.
-2. Copier tous les fichiers de l’archive dans le dossier principal du projet.
-3. Accepter le remplacement et la fusion des dossiers.
-4. Supprimer l’ancien fichier `public/_redirects` s’il existe encore.
-5. Installer la nouvelle dépendance :
-
-```powershell
-npm install
-```
-
-6. Vérifier le projet :
-
-```powershell
-npm run build
-```
-
-7. Envoyer la mise à jour :
+1. Décompresser l’archive dans le dossier principal du projet.
+2. Accepter la fusion des dossiers et le remplacement des fichiers.
+3. Envoyer la mise à jour sur GitHub :
 
 ```powershell
 git add .
-git commit -m "Ajout de la synchronisation familiale"
+git commit -m "Ajoute les accessoires et la bibliothèque d'icônes"
 git push
 ```
 
-Cloudflare relancera le déploiement. Wrangler 4.112 provisionnera automatiquement la base D1 liée à la variable `DB` lors du premier déploiement.
+Aucune nouvelle dépendance n’est ajoutée. Cloudflare reconstruira automatiquement l’application avec la configuration déjà en place.
 
-## Première utilisation
+## Première ouverture après la mise à jour
 
-Sur le téléphone principal :
+Si Petit Dressing retrouve des bavoirs, bavettes, tétras, langes ou capes de bain dans les tailles, une fenêtre affiche les quantités détectées.
 
-1. Ouvrir **Réglages**.
-2. Choisir **Créer le dressing partagé**.
-3. Copier le code affiché et l’envoyer à la seconde personne.
+- **Déplacer automatiquement** additionne les quantités dans Accessoires et retire les anciennes lignes des tailles.
+- **Plus tard** conserve tout en place. La proposition reste accessible dans Réglages.
 
-Sur le second téléphone :
-
-1. Ouvrir ou installer Petit Dressing.
-2. Ouvrir **Réglages**.
-3. Choisir **Rejoindre avec un code**.
-4. Coller le code.
-
-Le code agit comme une clé d’accès. Il ne doit être communiqué qu’aux personnes autorisées à modifier le dressing.
+La migration est synchronisée avec le dressing familial et ne s’exécute qu’une seule fois pour chaque article retrouvé.
