@@ -1,34 +1,31 @@
-# Petit Dressing v0.5 — accessoires et icônes
+# Petit Dressing v0.6 — lien de consultation
 
 ## Nouveautés
 
-- nouvelle section **Accessoires**, valable pour tous les âges ;
-- catégories intégrées : bavoirs, bavettes, tétras / langes coton et capes de bain ;
-- détection des accessoires déjà encodés dans les tailles ;
-- migration proposée sans perte de quantité, avec résumé avant validation ;
-- bibliothèque d’icônes pour les articles personnalisés ;
-- suggestion automatique d’icône selon le nom saisi ;
-- synchronisation de la migration et des nouvelles icônes entre les téléphones.
+- création d’un **lien en lecture seule** depuis les réglages ;
+- aucune modification possible depuis ce lien ;
+- choix d’afficher ou de masquer le prénom du bébé ;
+- actualisation automatique des données partagées ;
+- possibilité de régénérer ou désactiver le lien à tout moment ;
+- le code familial de modification n’apparaît jamais dans le lien public.
 
-## Installation de la mise à jour
+## Installation
 
-1. Décompresser l’archive dans le dossier principal du projet.
-2. Accepter la fusion des dossiers et le remplacement des fichiers.
-3. Envoyer la mise à jour sur GitHub :
+Copier le contenu de cette mise à jour dans le dossier principal du projet, puis :
 
 ```powershell
 git add .
-git commit -m "Ajoute les accessoires et la bibliothèque d'icônes"
+git commit -m "Ajoute le lien de consultation"
 git push
 ```
 
-Aucune nouvelle dépendance n’est ajoutée. Cloudflare reconstruira automatiquement l’application avec la configuration déjà en place.
+Cloudflare crée automatiquement la nouvelle table D1 au premier appel. Aucune commande de migration manuelle n’est nécessaire.
 
-## Première ouverture après la mise à jour
+## Utilisation
 
-Si Petit Dressing retrouve des bavoirs, bavettes, tétras, langes ou capes de bain dans les tailles, une fenêtre affiche les quantités détectées.
+Dans **Réglages → Lien de consultation** :
 
-- **Déplacer automatiquement** additionne les quantités dans Accessoires et retire les anciennes lignes des tailles.
-- **Plus tard** conserve tout en place. La proposition reste accessible dans Réglages.
-
-La migration est synchronisée avec le dressing familial et ne s’exécute qu’une seule fois pour chaque article retrouvé.
+1. choisir si le prénom du bébé doit apparaître ;
+2. créer le lien ;
+3. copier et partager ce lien ;
+4. le régénérer ou le désactiver si nécessaire.

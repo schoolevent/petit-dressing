@@ -1392,3 +1392,30 @@ footer {
     flex: 1 1 100%;
   }
 }
+\n\n/* Version de consultation */\n.read-only-banner {\n  width: min(1120px, calc(100% - 32px));\n  margin: 18px auto 0;\n  padding: 14px 16px;\n  border: 1px solid rgba(83, 68, 62, 0.18);\n  border-radius: 18px;\n  background: rgba(255, 255, 255, 0.82);\n  box-shadow: 0 10px 30px rgba(65, 48, 43, 0.08);\n  display: flex;\n  align-items: center;\n  gap: 12px;\n}\n\n.read-only-icon {\n  width: 42px;\n  height: 42px;\n  border-radius: 14px;\n  background: #f1e5df;\n  display: grid;\n  place-items: center;\n  font-size: 1.25rem;\n}\n\n.read-only-banner div {\n  display: grid;\n  gap: 2px;\n  flex: 1;\n}\n\n.read-only-banner small {\n  color: var(--muted);\n}\n\n.read-only-status {\n  white-space: nowrap;\n  padding: 7px 10px;\n  border-radius: 999px;\n  font-size: 0.78rem;\n  font-weight: 800;\n  background: #eee8e5;\n}\n\n.read-only-status.online { background: #e3f1e7; color: #2e6942; }\n.read-only-status.loading { background: #f4ecd8; color: #795d24; }\n.read-only-status.offline,\n.read-only-status.error { background: #f6e3e0; color: #8a4038; }\n\n.target-row.read-only {\n  gap: 8px;\n}\n\n.target-row.read-only strong {\n  min-width: 30px;\n  text-align: center;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: #f1ebe8;\n}\n\n.quantity-display {\n  min-width: 88px;\n  padding: 8px 12px;\n  border-radius: 16px;\n  background: #f5efec;\n  display: grid;\n  place-items: center;\n  align-self: center;\n}\n\n.quantity-display strong {\n  font-size: 1.35rem;\n  line-height: 1;\n}\n\n.quantity-display span {\n  margin-top: 3px;\n  color: var(--muted);\n  font-size: 0.72rem;\n}\n\n.view-share-content {\n  min-width: 0;\n  display: grid;\n  gap: 16px;\n}\n\n.share-name-option {\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  font-weight: 700;\n}\n\n.share-name-option input {\n  width: 19px;\n  height: 19px;\n  margin: 0;\n}\n\n.view-share-connected {\n  display: grid;\n  gap: 14px;\n}\n\n.view-link-box {\n  min-width: 0;\n  padding: 13px 15px;\n  border-radius: 16px;\n  background: #f6f0ed;\n  display: grid;\n  gap: 5px;\n}\n\n.view-link-box span {\n  color: var(--muted);\n  font-size: 0.78rem;\n}\n\n.view-link-box strong {\n  display: block;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-size: 0.88rem;\n}\n\n.muted-note {\n  padding: 12px 14px;\n  border-radius: 14px;\n  background: #f6f0ed;\n}\n\n@media (max-width: 640px) {\n  .read-only-banner {\n    width: min(100% - 20px, 1120px);\n    align-items: flex-start;\n    flex-wrap: wrap;\n  }\n\n  .read-only-status {\n    margin-left: 54px;\n  }\n\n  .quantity-display {\n    min-width: 72px;\n  }\n}\n
+
+.read-only-message {
+  width: min(620px, calc(100% - 32px));
+  margin: 70px auto;
+  padding: 34px 24px;
+  text-align: center;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 18px 50px rgba(65, 48, 43, 0.1);
+}
+
+.read-only-message > span {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 2.3rem;
+}
+
+.read-only-message h1 {
+  margin: 0 0 8px;
+  font-size: clamp(1.45rem, 4vw, 2rem);
+}
+
+.read-only-message p {
+  margin: 0;
+  color: var(--muted);
+}

@@ -38,6 +38,11 @@ type SpaceRow = {
   initial_state: string;
 };
 
+type ViewLinkRow = {
+  view_token: string;
+  show_baby_name: number;
+};
+
 let schemaPromise: Promise<void> | null = null;
 
 function json(data: unknown, status = 200) {
@@ -59,6 +64,20 @@ function getRoomCode(request: Request) {
   return normalized.length >= 16 && normalized.length <= 64
     ? normalized
     : null;
+}
+
+function normalizeViewToken(value: string | null) {
+  if (!value) return null;
+  const normalized = value.toUpperCase().replace(/[^A-Z2-9]/g, "");
+  return normalized.length >= 16 && normalized.length <= 64
+    ? normalized
+    : null;
+}
+
+function generateViewToken() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
 }
 
 async function sha256(value: string) {
@@ -92,6 +111,15 @@ async function ensureSchema(db: D1Database) {
         db.prepare(`
           CREATE INDEX IF NOT EXISTS idx_dressing_mutations_room_seq
           ON dressing_mutations(room_hash, seq)
+        `),
+        db.prepare(`
+          CREATE TABLE IF NOT EXISTS dressing_view_links (
+            room_hash TEXT PRIMARY KEY,
+            view_token TEXT NOT NULL UNIQUE,
+            show_baby_name INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          )
         `),
       ])
       .then(() => undefined)
@@ -268,11 +296,108 @@ async function handleMutation(request: Request, env: Env, roomHash: string) {
   return json({ ok: true, seq: row.seq });
 }
 
+async function handlePublicView(request: Request, env: Env) {
+  const token = normalizeViewToken(new URL(request.url).searchParams.get("token"));
+  if (!token) return json({ error: "INVALID_VIEW_TOKEN" }, 400);
+
+  const link = await env.DB.prepare(
+    `SELECT room_hash, show_baby_name
+     FROM dressing_view_links
+     WHERE view_token = ?
+     LIMIT 1`,
+  )
+    .bind(token)
+    .first<{ room_hash: string; show_baby_name: number }>();
+
+  if (!link) return json({ error: "VIEW_LINK_NOT_FOUND" }, 404);
+
+  const full = await getFullState(env.DB, link.room_hash);
+  if (!full) return json({ error: "ROOM_NOT_FOUND" }, 404);
+
+  return json({
+    state: {
+      ...full.state,
+      babyName: link.show_baby_name === 1 ? full.state.babyName : "",
+    },
+    lastSeq: full.lastSeq,
+  });
+}
+
+async function handleGetViewShare(env: Env, roomHash: string) {
+  const row = await env.DB.prepare(
+    `SELECT view_token, show_baby_name
+     FROM dressing_view_links
+     WHERE room_hash = ?
+     LIMIT 1`,
+  )
+    .bind(roomHash)
+    .first<ViewLinkRow>();
+
+  return json({
+    share: row
+      ? { token: row.view_token, showBabyName: row.show_baby_name === 1 }
+      : null,
+  });
+}
+
+async function handleSaveViewShare(request: Request, env: Env, roomHash: string) {
+  if (!(await roomExists(env.DB, roomHash))) {
+    return json({ error: "ROOM_NOT_FOUND" }, 404);
+  }
+
+  const body = (await readJson(request)) as {
+    showBabyName?: unknown;
+    regenerate?: unknown;
+  };
+  const showBabyName = body.showBabyName === true;
+  const existing = await env.DB.prepare(
+    `SELECT view_token, show_baby_name
+     FROM dressing_view_links
+     WHERE room_hash = ?
+     LIMIT 1`,
+  )
+    .bind(roomHash)
+    .first<ViewLinkRow>();
+  const token = existing && body.regenerate !== true
+    ? existing.view_token
+    : generateViewToken();
+  const now = Date.now();
+
+  await env.DB.prepare(
+    `INSERT INTO dressing_view_links
+       (room_hash, view_token, show_baby_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(room_hash) DO UPDATE SET
+       view_token = excluded.view_token,
+       show_baby_name = excluded.show_baby_name,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(roomHash, token, showBabyName ? 1 : 0, now, now)
+    .run();
+
+  return json({ share: { token, showBabyName } });
+}
+
+async function handleDeleteViewShare(env: Env, roomHash: string) {
+  await env.DB.prepare(
+    "DELETE FROM dressing_view_links WHERE room_hash = ?",
+  )
+    .bind(roomHash)
+    .run();
+  return json({ ok: true });
+}
+
 async function handleApi(request: Request, env: Env) {
   await ensureSchema(env.DB);
 
-  if (new URL(request.url).pathname === "/api/health") {
+  const path = new URL(request.url).pathname;
+
+  if (path === "/api/health") {
     return json({ ok: true });
+  }
+
+  if (path === "/api/view" && request.method === "GET") {
+    return handlePublicView(request, env);
   }
 
   const roomCode = getRoomCode(request);
@@ -280,7 +405,6 @@ async function handleApi(request: Request, env: Env) {
     return json({ error: "MISSING_OR_INVALID_SYNC_CODE" }, 401);
   }
   const roomHash = await sha256(roomCode);
-  const path = new URL(request.url).pathname;
 
   if (path === "/api/sync/create" && request.method === "POST") {
     return handleCreate(request, env, roomHash);
@@ -292,6 +416,18 @@ async function handleApi(request: Request, env: Env) {
 
   if (path === "/api/sync/mutate" && request.method === "POST") {
     return handleMutation(request, env, roomHash);
+  }
+
+  if (path === "/api/share/view" && request.method === "GET") {
+    return handleGetViewShare(env, roomHash);
+  }
+
+  if (path === "/api/share/view" && request.method === "POST") {
+    return handleSaveViewShare(request, env, roomHash);
+  }
+
+  if (path === "/api/share/view" && request.method === "DELETE") {
+    return handleDeleteViewShare(env, roomHash);
   }
 
   return json({ error: "NOT_FOUND" }, 404);

@@ -36,6 +36,7 @@ const LEGACY_STORAGE_KEYS = [
 const SYNC_STORAGE_KEY = "petit-dressing-sync-v1";
 const ACCESSORY_MIGRATION_DISMISSED_KEY =
   "petit-dressing-accessory-migration-dismissed-v1";
+const READ_ONLY_QUERY_PARAM = "view";
 
 type View = "inventory" | "shopping" | "settings";
 
@@ -51,6 +52,12 @@ type SavedState = {
 };
 
 type SyncStatus = "local" | "online" | "syncing" | "offline" | "error";
+type ReadOnlyStatus = "loading" | "online" | "offline" | "error";
+
+type ViewShareConfig = {
+  token: string;
+  showBabyName: boolean;
+};
 
 type SyncConfig = {
   code: string;
@@ -99,6 +106,21 @@ function generateSyncCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const bytes = crypto.getRandomValues(new Uint8Array(20));
   return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+function normalizeViewToken(value: string) {
+  return value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 64);
+}
+
+function getReadOnlyToken() {
+  const params = new URLSearchParams(window.location.search);
+  return normalizeViewToken(params.get(READ_ONLY_QUERY_PARAM) ?? "");
+}
+
+function makeViewUrl(token: string) {
+  const url = new URL(window.location.origin);
+  url.searchParams.set(READ_ONLY_QUERY_PARAM, normalizeViewToken(token));
+  return url.toString();
 }
 
 type MutationInput = SyncMutation extends infer Mutation
@@ -174,7 +196,13 @@ function fileSafeName(value: string) {
 }
 
 export default function App() {
-  const [savedState] = useState(loadState);
+  const [readOnlyToken] = useState(getReadOnlyToken);
+  const isReadOnly = readOnlyToken.length >= 16;
+  const [savedState] = useState(() =>
+    isReadOnly
+      ? { version: 5 as const, babyName: "", garments: makeInitialGarments() }
+      : loadState(),
+  );
   const [babyName, setBabyName] = useState(savedState.babyName);
   const [garments, setGarments] = useState<Garment[]>(savedState.garments);
   const [view, setView] = useState<View>("inventory");
@@ -205,19 +233,28 @@ export default function App() {
   );
   const [joinCode, setJoinCode] = useState("");
   const [showJoinForm, setShowJoinForm] = useState(false);
+  const [readOnlyStatus, setReadOnlyStatus] = useState<ReadOnlyStatus>(
+    isReadOnly ? "loading" : "online",
+  );
+  const [hasReadOnlyData, setHasReadOnlyData] = useState(!isReadOnly);
+  const [viewShare, setViewShare] = useState<ViewShareConfig | null>(null);
+  const [shareShowBabyName, setShareShowBabyName] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
   const syncConfigRef = useRef(syncConfig);
   const appStateRef = useRef<SyncState>({ babyName, garments });
   const syncBusyRef = useRef(false);
 
   useEffect(() => {
+    appStateRef.current = { babyName, garments };
+    if (isReadOnly) return;
+
     const payload: SavedState = {
       version: 5,
       babyName,
       garments,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    appStateRef.current = { babyName, garments };
-  }, [babyName, garments]);
+  }, [babyName, garments, isReadOnly]);
 
   useEffect(() => {
     syncConfigRef.current = syncConfig;
@@ -225,6 +262,8 @@ export default function App() {
   }, [syncConfig]);
 
   useEffect(() => {
+    if (isReadOnly) return;
+
     if (!syncConfig.code) {
       setSyncStatus(navigator.onLine ? "local" : "offline");
       return;
@@ -248,7 +287,74 @@ export default function App() {
       window.removeEventListener("offline", handleOffline);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [syncConfig.code]);
+  }, [syncConfig.code, isReadOnly]);
+
+  useEffect(() => {
+    if (!isReadOnly) return;
+
+    let cancelled = false;
+
+    async function refreshReadOnlyState() {
+      if (!navigator.onLine) {
+        if (!cancelled) setReadOnlyStatus("offline");
+        return;
+      }
+
+      if (!cancelled) setReadOnlyStatus((current) =>
+        current === "online" ? "online" : "loading",
+      );
+
+      try {
+        const response = await fetch(
+          `/api/view?token=${encodeURIComponent(readOnlyToken)}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) throw new Error(`HTTP_${response.status}`);
+
+        const payload = (await response.json()) as { state: SyncState };
+        const sharedState = normalizeSyncState(payload.state);
+        if (cancelled) return;
+        setBabyName(sharedState.babyName);
+        setGarments(sharedState.garments);
+        setHasReadOnlyData(true);
+        setReadOnlyStatus("online");
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          if (navigator.onLine) setHasReadOnlyData(false);
+          setReadOnlyStatus(navigator.onLine ? "error" : "offline");
+        }
+      }
+    }
+
+    void refreshReadOnlyState();
+    const timer = window.setInterval(() => void refreshReadOnlyState(), 7000);
+    const handleOnline = () => void refreshReadOnlyState();
+    const handleOffline = () => setReadOnlyStatus("offline");
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void refreshReadOnlyState();
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [isReadOnly, readOnlyToken]);
+
+  useEffect(() => {
+    if (isReadOnly || !syncConfig.code) {
+      setViewShare(null);
+      return;
+    }
+    void refreshViewShare();
+  }, [isReadOnly, syncConfig.code]);
 
   useEffect(() => {
     if (!notice) return;
@@ -464,6 +570,7 @@ export default function App() {
   }
 
   function commitMutation(input: MutationInput) {
+    if (isReadOnly) return;
     const mutation = makeMutation(input);
     applyMutationLocally(mutation);
     enqueueMutation(mutation);
@@ -673,6 +780,87 @@ export default function App() {
         "Copie ce code :",
         formatSyncCode(syncConfig.code),
       );
+    }
+  }
+
+  async function refreshViewShare() {
+    if (!syncConfigRef.current.code || isReadOnly) return;
+
+    try {
+      const response = await syncFetch("/api/share/view");
+      const payload = (await response.json()) as {
+        share: ViewShareConfig | null;
+      };
+      setViewShare(payload.share);
+      setShareShowBabyName(payload.share?.showBabyName ?? false);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async function saveViewShare(regenerate = false, showBabyName = shareShowBabyName) {
+    if (!syncConfigRef.current.code || shareBusy) return;
+    setShareBusy(true);
+
+    try {
+      const response = await syncFetch("/api/share/view", {
+        method: "POST",
+        body: JSON.stringify({ showBabyName, regenerate }),
+      });
+      const payload = (await response.json()) as { share: ViewShareConfig };
+      setViewShare(payload.share);
+      setShareShowBabyName(payload.share.showBabyName);
+      setNotice(regenerate ? "Nouveau lien créé." : "Lien de consultation prêt.");
+    } catch (error) {
+      console.error(error);
+      window.alert("Impossible de créer le lien de consultation pour le moment.");
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  async function toggleViewShareBabyName() {
+    const next = !shareShowBabyName;
+    setShareShowBabyName(next);
+    if (viewShare) await saveViewShare(false, next);
+  }
+
+  async function copyViewShareLink() {
+    if (!viewShare) return;
+    const url = makeViewUrl(viewShare.token);
+    try {
+      await navigator.clipboard.writeText(url);
+      setNotice("Lien de consultation copié.");
+    } catch {
+      window.prompt("Copie ce lien :", url);
+    }
+  }
+
+  async function regenerateViewShare() {
+    const confirmed = window.confirm(
+      "Créer un nouveau lien ? L’ancien lien de consultation ne fonctionnera plus.",
+    );
+    if (!confirmed) return;
+    await saveViewShare(true);
+  }
+
+  async function disableViewShare() {
+    if (!viewShare || shareBusy) return;
+    const confirmed = window.confirm(
+      "Désactiver le lien de consultation ? Les personnes qui l’utilisent n’auront plus accès au dressing.",
+    );
+    if (!confirmed) return;
+
+    setShareBusy(true);
+    try {
+      await syncFetch("/api/share/view", { method: "DELETE" });
+      setViewShare(null);
+      setNotice("Lien de consultation désactivé.");
+    } catch (error) {
+      console.error(error);
+      window.alert("Impossible de désactiver le lien pour le moment.");
+    } finally {
+      setShareBusy(false);
     }
   }
 
@@ -898,13 +1086,60 @@ export default function App() {
 
   const dressingTitle = babyName.trim()
     ? `Le dressing de ${babyName.trim()}`
-    : "Petit Dressing";
+    : isReadOnly
+      ? "Le dressing de bébé"
+      : "Petit Dressing";
+
+  if (isReadOnly && !hasReadOnlyData) {
+    return (
+      <main className="app-shell">
+        <aside className="read-only-banner" aria-label="Mode consultation">
+          <span className="read-only-icon" aria-hidden="true">👁️</span>
+          <div>
+            <strong>Consultation uniquement</strong>
+            <small>Ce lien ne permet aucune modification.</small>
+          </div>
+          <span className={`read-only-status ${readOnlyStatus}`}>
+            {readOnlyStatus === "loading" ? "Chargement…" :
+              readOnlyStatus === "offline" ? "Hors ligne" : "Lien indisponible"}
+          </span>
+        </aside>
+        <section className="read-only-message">
+          <span aria-hidden="true">{readOnlyStatus === "loading" ? "🧺" : "🔒"}</span>
+          <h1>{readOnlyStatus === "loading" ? "Chargement du dressing…" : "Impossible d’ouvrir ce dressing"}</h1>
+          <p>
+            {readOnlyStatus === "offline"
+              ? "Une connexion internet est nécessaire pour la première consultation."
+              : readOnlyStatus === "error"
+                ? "Le lien a peut-être été désactivé ou remplacé par un nouveau lien."
+                : "Les données arrivent dans un instant."}
+          </p>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
       {notice && <div className="toast">{notice}</div>}
 
-      {showAccessoryMigration && accessoryMigrationCandidates.length > 0 && (
+      {isReadOnly && (
+        <aside className="read-only-banner" aria-label="Mode consultation">
+          <span className="read-only-icon" aria-hidden="true">👁️</span>
+          <div>
+            <strong>Consultation uniquement</strong>
+            <small>Les données sont visibles, mais aucune modification n’est possible.</small>
+          </div>
+          <span className={`read-only-status ${readOnlyStatus}`}>
+            {readOnlyStatus === "online" && "À jour"}
+            {readOnlyStatus === "loading" && "Chargement…"}
+            {readOnlyStatus === "offline" && "Hors ligne"}
+            {readOnlyStatus === "error" && "Lien indisponible"}
+          </span>
+        </aside>
+      )}
+
+      {!isReadOnly && showAccessoryMigration && accessoryMigrationCandidates.length > 0 && (
         <div className="modal-backdrop" role="presentation">
           <section
             className="migration-modal"
@@ -976,7 +1211,9 @@ export default function App() {
           <p className="eyebrow">Inventaire bébé</p>
           <h1>{dressingTitle}</h1>
           <p className="hero-copy">
-            Vêtements, accessoires et liste d’achats réunis au même endroit.
+            {isReadOnly
+              ? "Inventaire partagé en lecture seule, mis à jour automatiquement."
+              : "Vêtements, accessoires et liste d’achats réunis au même endroit."}
           </p>
         </div>
 
@@ -1000,14 +1237,16 @@ export default function App() {
               <strong>{shoppingSummary.missingPieces}</strong>
             )}
           </button>
-          <button
-            type="button"
-            className={view === "settings" ? "nav-button active" : "nav-button"}
-            onClick={() => setView("settings")}
-          >
-            <span>⚙️</span>
-            Réglages
-          </button>
+          {!isReadOnly && (
+            <button
+              type="button"
+              className={view === "settings" ? "nav-button active" : "nav-button"}
+              onClick={() => setView("settings")}
+            >
+              <span>⚙️</span>
+              Réglages
+            </button>
+          )}
         </nav>
       </header>
 
@@ -1070,11 +1309,13 @@ export default function App() {
               Voir uniquement ce qu’il manque
             </label>
 
-            <button type="button" className="text-button" onClick={resetCurrentSize}>
-              {activeSize === ACCESSORIES_SECTION
-                ? "Réinitialiser les accessoires"
-                : "Réinitialiser cette taille"}
-            </button>
+            {!isReadOnly && (
+              <button type="button" className="text-button" onClick={resetCurrentSize}>
+                {activeSize === ACCESSORIES_SECTION
+                  ? "Réinitialiser les accessoires"
+                  : "Réinitialiser cette taille"}
+              </button>
+            )}
           </section>
 
           <section className="wardrobe">
@@ -1083,19 +1324,23 @@ export default function App() {
                 <p className="eyebrow">{SECTION_SUBTITLES[activeSize]}</p>
                 <h2>{activeSize}</h2>
                 <p className="section-description">
-                  Les objectifs sont des repères de départ et restent modifiables.
+                  {isReadOnly
+                    ? "Quantités et objectifs communiqués par les parents."
+                    : "Les objectifs sont des repères de départ et restent modifiables."}
                 </p>
               </div>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => setShowAddForm((current) => !current)}
-              >
-                + Ajouter
-              </button>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => setShowAddForm((current) => !current)}
+                >
+                  + Ajouter
+                </button>
+              )}
             </div>
 
-            {showAddForm && (
+            {!isReadOnly && showAddForm && (
               <div className="add-form">
                 <div className="add-form-fields">
                   <div className="selected-item-icon" aria-hidden="true">
@@ -1189,51 +1434,62 @@ export default function App() {
                                 </span>
                               </div>
 
-                              <div className="target-row">
+                              <div className={isReadOnly ? "target-row read-only" : "target-row"}>
                                 <span>Objectif</span>
-                                <button
-                                  type="button"
-                                  aria-label={`Diminuer l’objectif de ${item.label}`}
-                                  onClick={() =>
-                                    updateTarget(item.id, item.target - 1)
-                                  }
-                                >
-                                  −
-                                </button>
+                                {!isReadOnly && (
+                                  <button
+                                    type="button"
+                                    aria-label={`Diminuer l’objectif de ${item.label}`}
+                                    onClick={() =>
+                                      updateTarget(item.id, item.target - 1)
+                                    }
+                                  >
+                                    −
+                                  </button>
+                                )}
                                 <strong>{item.target}</strong>
-                                <button
-                                  type="button"
-                                  aria-label={`Augmenter l’objectif de ${item.label}`}
-                                  onClick={() =>
-                                    updateTarget(item.id, item.target + 1)
-                                  }
-                                >
-                                  +
-                                </button>
+                                {!isReadOnly && (
+                                  <button
+                                    type="button"
+                                    aria-label={`Augmenter l’objectif de ${item.label}`}
+                                    onClick={() =>
+                                      updateTarget(item.id, item.target + 1)
+                                    }
+                                  >
+                                    +
+                                  </button>
+                                )}
                               </div>
                             </div>
                           </div>
 
-                          <div className="quantity-control">
-                            <button
-                              type="button"
-                              aria-label={`Retirer un article : ${item.label}`}
-                              onClick={() => updateQuantity(item.id, -1)}
-                              disabled={item.quantity === 0}
-                            >
-                              −
-                            </button>
-                            <strong>{item.quantity}</strong>
-                            <button
-                              type="button"
-                              aria-label={`Ajouter un article : ${item.label}`}
-                              onClick={() => updateQuantity(item.id, 1)}
-                            >
-                              +
-                            </button>
-                          </div>
+                          {isReadOnly ? (
+                            <div className="quantity-display">
+                              <strong>{item.quantity}</strong>
+                              <span>en stock</span>
+                            </div>
+                          ) : (
+                            <div className="quantity-control">
+                              <button
+                                type="button"
+                                aria-label={`Retirer un article : ${item.label}`}
+                                onClick={() => updateQuantity(item.id, -1)}
+                                disabled={item.quantity === 0}
+                              >
+                                −
+                              </button>
+                              <strong>{item.quantity}</strong>
+                              <button
+                                type="button"
+                                aria-label={`Ajouter un article : ${item.label}`}
+                                onClick={() => updateQuantity(item.id, 1)}
+                              >
+                                +
+                              </button>
+                            </div>
+                          )}
 
-                          {item.custom && (
+                          {!isReadOnly && item.custom && (
                             <button
                               type="button"
                               className="delete-button"
@@ -1262,7 +1518,9 @@ export default function App() {
               <p className="eyebrow">Liste automatique</p>
               <h2>Ce qu’il reste à acheter</h2>
               <p>
-                Chaque ajout ici augmente directement la quantité dans le dressing.
+                {isReadOnly
+                  ? "Cette liste est calculée à partir des objectifs définis par les parents."
+                  : "Chaque ajout ici augmente directement la quantité dans le dressing."}
               </p>
             </div>
           </div>
@@ -1322,22 +1580,24 @@ export default function App() {
                           <span className="missing-badge">
                             {missing} manquant{missing > 1 ? "s" : ""}
                           </span>
-                          <div className="shopping-actions">
-                            <button
-                              type="button"
-                              className="small-primary"
-                              onClick={() => updateQuantity(item.id, 1)}
-                            >
-                              +1 rangé
-                            </button>
-                            <button
-                              type="button"
-                              className="small-secondary"
-                              onClick={() => completeItem(item.id)}
-                            >
-                              Tout ajouté
-                            </button>
-                          </div>
+                          {!isReadOnly && (
+                            <div className="shopping-actions">
+                              <button
+                                type="button"
+                                className="small-primary"
+                                onClick={() => updateQuantity(item.id, 1)}
+                              >
+                                +1 rangé
+                              </button>
+                              <button
+                                type="button"
+                                className="small-secondary"
+                                onClick={() => completeItem(item.id)}
+                              >
+                                Tout ajouté
+                              </button>
+                            </div>
+                          )}
                         </article>
                       );
                     })}
@@ -1349,7 +1609,7 @@ export default function App() {
         </section>
       )}
 
-      {view === "settings" && (
+      {!isReadOnly && view === "settings" && (
         <section className="settings-page">
           <div className="page-heading">
             <div>
@@ -1500,6 +1760,82 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                )}
+              </div>
+            </article>
+
+            <article className="settings-card view-share-card">
+              <div className="settings-icon">👁️</div>
+              <div className="view-share-content">
+                <div>
+                  <h3>Lien de consultation</h3>
+                  <p>
+                    Partage le dressing sans donner la possibilité de modifier les
+                    quantités, les objectifs ou les réglages.
+                  </p>
+                </div>
+
+                {!syncConfig.code ? (
+                  <p className="muted-note">
+                    Active d’abord la synchronisation familiale pour créer un lien
+                    consultable et toujours à jour.
+                  </p>
+                ) : (
+                  <>
+                    <label className="share-name-option">
+                      <input
+                        type="checkbox"
+                        checked={shareShowBabyName}
+                        onChange={() => void toggleViewShareBabyName()}
+                        disabled={shareBusy}
+                      />
+                      <span>Afficher le prénom du bébé sur la version partagée</span>
+                    </label>
+
+                    {viewShare ? (
+                      <div className="view-share-connected">
+                        <div className="view-link-box">
+                          <span>Lien en lecture seule</span>
+                          <strong>{makeViewUrl(viewShare.token)}</strong>
+                        </div>
+                        <div className="settings-actions">
+                          <button
+                            type="button"
+                            className="primary-button"
+                            onClick={copyViewShareLink}
+                            disabled={shareBusy}
+                          >
+                            Copier le lien
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => void regenerateViewShare()}
+                            disabled={shareBusy}
+                          >
+                            Créer un nouveau lien
+                          </button>
+                          <button
+                            type="button"
+                            className="text-button"
+                            onClick={() => void disableViewShare()}
+                            disabled={shareBusy}
+                          >
+                            Désactiver le lien
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => void saveViewShare()}
+                        disabled={shareBusy}
+                      >
+                        {shareBusy ? "Création…" : "Créer le lien de consultation"}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </article>
@@ -1659,7 +1995,7 @@ export default function App() {
       )}
 
       <footer>
-        Sauvegarde locale + synchronisation familiale · Petit Dressing v0.5
+        {isReadOnly ? "Version de consultation · " : "Sauvegarde locale + synchronisation familiale · "}Petit Dressing v0.6
       </footer>
     </main>
   );
